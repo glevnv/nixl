@@ -30,6 +30,10 @@ static constexpr const char *local_agent_name = "LocalAgent";
 static constexpr const char *remote_agent_name = "RemoteAgent";
 static constexpr const char *nonexisting_plugin = "NonExistingPlugin";
 
+static const std::vector<std::vector<std::string>> illegal_plugin_combinations = {
+  {"GDS", "GDS_MT"},
+};
+
 /* Generates a random number in [0,255] (byte range). */
 unsigned char GetRandomByte() {
   std::random_device rd;
@@ -124,8 +128,19 @@ protected:
   }
 };
 
-class SingleAgentWithMemParamFixture : public testing::TestWithParam<nixl_mem_t> {
+class SingleAgentWithPluginListParamFixture : public testing::TestWithParam<std::vector<std::string>> {
 protected:
+  std::unique_ptr<AgentHelper> agent_helper_;
+  nixlAgent* agent_;
+
+  void SetUp() override {
+    agent_helper_ = std::make_unique<AgentHelper>(local_agent_name);
+    agent_ = agent_helper_->GetAgent();
+  }
+};
+
+class SingleAgentWithMemParamFixture : public testing::TestWithParam<nixl_mem_t> {
+  protected:
   std::unique_ptr<AgentHelper> agent_helper_;
   nixlAgent* agent_;
 
@@ -171,6 +186,79 @@ TEST_F(SingleAgentSessionFixture, CreateExistingPluginBackendTest) {
   nixlBackendH* backend;
   EXPECT_EQ(agent_helper_->CreateBackendWithGMock(params, backend), NIXL_SUCCESS);
 }
+
+static void addIllegalPluginNames(const std::vector<std::vector<std::string>>& illegal_plugin_combinations,
+                                  const std::string& plugin_name,
+                                  std::vector<std::string>& illegal_plugin_names) {
+  // Search through all illegal plugin combinations to find one that contains the given plugin_name
+  auto found_combination = std::find_if(illegal_plugin_combinations.begin(),
+                                        illegal_plugin_combinations.end(),
+                                        [&plugin_name](const std::vector<std::string>& combination) {
+                                          // Check if the given plugin_name is in the current combination
+                                          return std::any_of(combination.begin(), combination.end(),
+                                                             [&plugin_name](const std::string& name) {
+                                                              return plugin_name == name;
+                                                             });
+                                        });
+
+  if (found_combination != illegal_plugin_combinations.end()) {
+      // If found, add all names from that combination to illegal_plugin_names
+      illegal_plugin_names.insert(illegal_plugin_names.end(),
+                                  found_combination->begin(), found_combination->end());
+  }
+}
+
+TEST_P(SingleAgentWithPluginListParamFixture, CreatePluginsBackendTest) {
+  nixlPluginManager& plugin_manager = nixlPluginManager::getInstance();
+  for (const auto& plugin_name : GetParam()) {
+    EXPECT_EQ(plugin_manager.loadPlugin(plugin_name), nullptr);
+  }
+
+  std::vector<std::string> illegal_plugin_names;
+  nixl_b_params_t params;
+  nixlBackendH* backend;
+  for (const auto& plugin_name : GetParam()) {
+    bool is_legal_plugin = true;
+    for (const auto& illegal_plugin_name : illegal_plugin_names) {
+      if (plugin_name == illegal_plugin_name) {
+        EXPECT_NE(agent_->createBackend(plugin_name, params, backend), NIXL_SUCCESS);
+        is_legal_plugin = false;
+        break;
+      }
+    }
+
+    if (is_legal_plugin) {
+      EXPECT_EQ(agent_->createBackend(plugin_name, params, backend), NIXL_SUCCESS);
+      addIllegalPluginNames(illegal_plugin_combinations, plugin_name, illegal_plugin_names);
+    }
+  }
+}
+
+static std::vector<std::vector<std::string>> getIllegalPluginNamesPermutations(
+  const std::vector<std::vector<std::string>>& illegal_plugin_combinations) {
+  std::vector<std::vector<std::string>> permutations;
+  for (const auto& combination : illegal_plugin_combinations) {
+    // Try each plugin in the combination as a starting point
+    for (size_t start = 0; start < combination.size(); ++start) {
+      std::vector<std::string> permutation{combination[start]};
+      permutations.push_back(permutation);
+
+      // Add remaining plugins from the combination to build longer permutations
+      for (size_t i = 0; i < combination.size(); ++i) {
+        if (i != start) {
+          permutation.push_back(combination[i]);
+          permutations.push_back(permutation);
+        }
+      }
+    }
+  }
+  return permutations;
+}
+
+INSTANTIATE_TEST_SUITE_P(IllegalPluginNamesPermutations,
+  SingleAgentWithPluginListParamFixture,
+  testing::ValuesIn(getIllegalPluginNamesPermutations(illegal_plugin_combinations)));
+
 
 TEST_F(SingleAgentSessionFixture, GetNonExistingBackendParamsTest) {
   nixl_mem_list_t mem;
